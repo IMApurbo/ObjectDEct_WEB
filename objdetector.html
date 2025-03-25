@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object Detection with TensorFlow.js</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+        video {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        canvas {
+            width: 100%;
+            border: 2px solid #333;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        button, select {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        select {
+            background-color: #fff;
+            border: 1px solid #333;
+        }
+        #status {
+            margin-top: 10px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Object Detection App with TensorFlow.js</h1>
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <div class="controls">
+            <button onclick="startDetection()">Start Detection</button>
+            <button onclick="stopDetection()">Stop Detection</button>
+            <select id="cameraSelect" onchange="switchCamera()">
+                <option value="">Select Camera</option>
+            </select>
+            <div id="status">Status: Inactive</div>
+        </div>
+    </div>
+
+    <!-- Load TensorFlow.js and COCO-SSD model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@latest"></script>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const status = document.getElementById('status');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const ctx = canvas.getContext('2d');
+        let model;
+        let detecting = false;
+        let currentStream;
+
+        // Load the COCO-SSD model
+        async function loadModel() {
+            try {
+                status.textContent = 'Status: Loading model...';
+                model = await cocoSsd.load();
+                status.textContent = 'Status: Model loaded, Inactive';
+            } catch (error) {
+                console.error('Error loading model:', error);
+                status.textContent = 'Status: Error loading model';
+            }
+        }
+
+        // Populate camera dropdown
+        async function populateCameraOptions() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                cameraSelect.innerHTML = '<option value="">Select Camera</option>';
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+
+                // Auto-select first camera if available
+                if (videoDevices.length > 0) {
+                    cameraSelect.value = videoDevices[0].deviceId;
+                    switchCamera();
+                }
+            } catch (err) {
+                console.error('Error enumerating devices:', err);
+                status.textContent = 'Error: Cannot list cameras';
+            }
+        }
+
+        // Switch camera
+        async function switchCamera() {
+            const deviceId = cameraSelect.value;
+            if (!deviceId) return;
+
+            // Stop current stream if exists
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { deviceId: { exact: deviceId } }
+                });
+                video.srcObject = stream;
+                currentStream = stream;
+                video.play();
+            } catch (err) {
+                console.error('Error switching camera:', err);
+                status.textContent = 'Error: Cannot switch camera';
+            }
+        }
+
+        // Set canvas size when video metadata is loaded
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            if (!model) loadModel(); // Load model only once
+        };
+
+        // Detect objects using TensorFlow.js COCO-SSD
+        async function detectObjects() {
+            if (!detecting || !model) return;
+
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const predictions = await model.detect(video);
+
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
+
+                ctx.strokeStyle = 'green';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x, y, width, height);
+
+                ctx.fillStyle = 'green';
+                ctx.fillRect(x, y - 20, ctx.measureText(label).width + 10, 20);
+
+                ctx.fillStyle = 'white';
+                ctx.font = '16px Arial';
+                ctx.fillText(label, x + 5, y - 5);
+            });
+
+            status.textContent = predictions.length > 0 ?
+                `Status: Detected ${predictions.length} object(s)` :
+                'Status: No objects detected';
+
+            requestAnimationFrame(detectObjects);
+        }
+
+        function startDetection() {
+            if (!model) {
+                status.textContent = 'Status: Please wait for model to load';
+                return;
+            }
+            if (!detecting) {
+                detecting = true;
+                status.textContent = 'Status: Detecting...';
+                detectObjects();
+            }
+        }
+
+        function stopDetection() {
+            detecting = false;
+            status.textContent = 'Status: Inactive';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Initial canvas display
+        video.addEventListener('play', () => {
+            function drawFrame() {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                if (detecting) {
+                    detectObjects();
+                } else {
+                    requestAnimationFrame(drawFrame);
+                }
+            }
+            requestAnimationFrame(drawFrame);
+        });
+
+        // Initialize camera options on load
+        window.onload = populateCameraOptions;
+    </script>
+</body>
+</html>
