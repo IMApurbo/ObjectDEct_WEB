@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teachable Machine Classification with ZIP Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+        video {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        canvas {
+            width: 100%;
+            border: 2px solid #333;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        button, select, input[type="file"] {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        select, input[type="file"] {
+            background-color: #fff;
+            border: 1px solid #333;
+        }
+        #status {
+            margin-top: 10px;
+            font-size: 18px;
+        }
+        #prediction {
+            font-size: 20px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Teachable Machine Classification App</h1>
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <div class="controls">
+            <input type="file" id="modelZip" accept=".zip" onchange="loadUploadedZip()">
+            <button onclick="startDetection()">Start Detection</button>
+            <button onclick="stopDetection()">Stop Detection</button>
+            <select id="cameraSelect" onchange="switchCamera()">
+                <option value="">Select Camera</option>
+            </select>
+            <div id="status">Status: Inactive</div>
+            <div id="prediction"></div>
+        </div>
+    </div>
+
+    <!-- Load TensorFlow.js and JSZip -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const status = document.getElementById('status');
+        const predictionDiv = document.getElementById('prediction');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const modelZipInput = document.getElementById('modelZip');
+        const ctx = canvas.getContext('2d');
+        let model;
+        let detecting = false;
+        let currentStream;
+        let classLabels = ['class1', 'class2', 'class3']; // Default, updated by metadata
+
+        // Load model from uploaded ZIP
+        async function loadUploadedZip() {
+            const file = modelZipInput.files[0];
+            if (!file || !file.name.endsWith('.zip')) {
+                status.textContent = 'Status: Please upload a .zip file';
+                return;
+            }
+
+            status.textContent = 'Status: Extracting ZIP...';
+            try {
+                const zip = new JSZip();
+                const zipData = await zip.loadAsync(file);
+
+                // Extract model.json and weights
+                let modelJson;
+                const weightFiles = {};
+                for (const [filename, fileData] of Object.entries(zipData.files)) {
+                    if (filename.endsWith('model.json')) {
+                        modelJson = await fileData.async('blob');
+                    } else if (filename.endsWith('.bin')) {
+                        weightFiles[filename] = await fileData.async('blob');
+                    }
+                }
+
+                if (!modelJson) {
+                    status.textContent = 'Status: model.json not found in ZIP';
+                    return;
+                }
+                if (Object.keys(weightFiles).length === 0) {
+                    status.textContent = 'Status: No weights.bin files found in ZIP';
+                    return;
+                }
+
+                // Load the model
+                status.textContent = 'Status: Loading model...';
+                const modelUrl = URL.createObjectURL(modelJson);
+                const weightMap = {};
+                for (const [name, blob] of Object.entries(weightFiles)) {
+                    weightMap[name] = URL.createObjectURL(blob);
+                }
+
+                model = await tf.loadLayersModel(modelUrl, {
+                    weightUrlConverter: (weightFileName) => weightMap[weightFileName] || Promise.reject(`Weight file ${weightFileName} not found`)
+                });
+
+                // Load class labels from metadata if available
+                const metadataText = await (await fetch(modelUrl)).text();
+                const metadata = JSON.parse(metadataText);
+                if (metadata.labels) {
+                    classLabels = metadata.labels;
+                }
+
+                status.textContent = 'Status: Model loaded, Inactive';
+            } catch (error) {
+                console.error('Error loading ZIP or model:', error);
+                status.textContent = 'Status: Error loading model from ZIP';
+            }
+        }
+
+        // Populate camera dropdown
+        async function populateCameraOptions() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                cameraSelect.innerHTML = '<option value="">Select Camera</option>';
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+
+                if (videoDevices.length > 0) {
+                    cameraSelect.value = videoDevices[0].deviceId;
+                    switchCamera();
+                }
+            } catch (err) {
+                console.error('Error enumerating devices:', err);
+                status.textContent = 'Error: Cannot list cameras';
+            }
+        }
+
+        // Switch camera
+        async function switchCamera() {
+            const deviceId = cameraSelect.value;
+            if (!deviceId) return;
+
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { deviceId: { exact: deviceId } }
+                });
+                video.srcObject = stream;
+                currentStream = stream;
+                video.play();
+            } catch (err) {
+                console.error('Error switching camera:', err);
+                status.textContent = 'Error: Cannot switch camera';
+            }
+        }
+
+        // Set canvas size when video metadata is loaded
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+        };
+
+        // Classify the video frame
+        async function detectObjects() {
+            if (!detecting || !model) return;
+
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Preprocess the frame (Teachable Machine default: 224x224)
+            const tensor = tf.browser.fromPixels(canvas)
+                .resizeNearestNeighbor([224, 224])
+                .toFloat()
+                .div(tf.scalar(255.0))
+                .expandDims();
+
+            // Run prediction
+            const predictions = await model.predict(tensor);
+            const probabilities = predictions.arraySync()[0];
+
+            // Get the top class
+            const maxProb = Math.max(...probabilities);
+            const topClassIdx = probabilities.indexOf(maxProb);
+            const label = `${classLabels[topClassIdx]} (${Math.round(maxProb * 100)}%)`;
+
+            // Display prediction
+            predictionDiv.textContent = `Prediction: ${label}`;
+            status.textContent = maxProb > 0.5 ? 'Status: Classified' : 'Status: Low confidence';
+
+            tf.dispose([tensor, predictions]);
+            requestAnimationFrame(detectObjects);
+        }
+
+        function startDetection() {
+            if (!model) {
+                status.textContent = 'Status: Please upload and load a ZIP file first';
+                return;
+            }
+            if (!detecting) {
+                detecting = true;
+                status.textContent = 'Status: Detecting...';
+                detectObjects();
+            }
+        }
+
+        function stopDetection() {
+            detecting = false;
+            status.textContent = 'Status: Inactive';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            predictionDiv.textContent = '';
+        }
+
+        video.addEventListener('play', () => {
+            function drawFrame() {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                if (detecting) {
+                    detectObjects();
+                } else {
+                    requestAnimationFrame(drawFrame);
+                }
+            }
+            requestAnimationFrame(drawFrame);
+        });
+
+        window.onload = populateCameraOptions;
+    </script>
+</body>
+</html>
